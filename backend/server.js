@@ -12,6 +12,8 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
 // Azure Storage configuration
+
+
 const AZURE_STORAGE_CONNECTION_STRING = process.env.AZURE_STORAGE_CONNECTION_STRING;
 const CONTAINER_NAME = process.env.CONTAINER_NAME;
 
@@ -27,14 +29,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 try {
   const file = req.file;
 
-  // Create a new BlobServiceClient
-  const blobServiceClient = BlobServiceClient.fromConnectionString(
-    AZURE_STORAGE_CONNECTION_STRING
-  );
-
-  // Get a reference to a container
-  const containerClient = blobServiceClient.getContainerClient(CONTAINER_NAME);
-
   // Upload the file to Azure Blob Storage
   const blockBlobClient = containerClient.getBlockBlobClient(file.originalname);
   const uploadBlobResponse = await blockBlobClient.upload(file.buffer, file.buffer.length);
@@ -49,59 +43,44 @@ try {
 
 
 // Route for streaming the uploaded video
+const {generateBlobSASQueryParameters, BlobSASPermissions, StorageSharedKeyCredential } = require("@azure/storage-blob");
+
+
+async function generateSasToken(filename) {
+  const storageAccountName = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+  const storageAccountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
+  const containerName = process.env.CONTAINER_NAME;
+
+  const sharedKeyCredential = new StorageSharedKeyCredential(storageAccountName, storageAccountKey);
+  const blobServiceClient = new BlobServiceClient(`https://${storageAccountName}.blob.core.windows.net`, sharedKeyCredential);
+  const containerClient = blobServiceClient.getContainerClient(containerName);
+  const blobClient = containerClient.getBlobClient(filename);
+
+  const sasOptions = {
+    containerName: containerClient.containerName,
+    blobName: blobClient.name,
+    permissions: BlobSASPermissions.parse("r"),
+    protocol: "https",
+    startsOn: new Date(),
+    expiresOn: new Date(new Date().getTime() + 3600 * 1000), // Set the expiration time (e.g., 1 hour from now)
+  };
+
+  const sasToken = generateBlobSASQueryParameters(sasOptions, sharedKeyCredential).toString();
+  return blobClient.url + "?" + sasToken;
+}
+
 // Route for streaming the uploaded video
 app.get('/api/stream/:filename', async (req, res) => {
   const filename = req.params.filename;
-
+  console.log('Streaming file:', filename);
   try {
-    const blobClient = containerClient.getBlobClient(filename);
-
-    // Get the video properties to set the content type
-    const properties = await blobClient.getProperties();
-    const contentType = properties.contentType;
-
-    // Set the response headers for streaming the video
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Accept-Ranges', 'bytes');
-
-    // Check if the client sent a range header
-    const range = req.headers.range;
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : properties.contentLength - 1;
-      const chunkSize = end - start + 1;
-
-      // Set the response headers for partial content request
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${properties.contentLength}`);
-      res.setHeader('Content-Length', chunkSize);
-      res.setHeader('Cache-Control', 'no-cache');
-
-      // Stream the video in chunks
-      const downloadResponse = await blobClient.download(0, properties.contentLength);
-      const responseStream = downloadResponse.readableStreamBody;
-      responseStream.on('data', (chunk) => {
-        res.write(chunk);
-      });
-      responseStream.on('end', () => {
-        res.end();
-      });
-      responseStream.on('error', (error) => {
-        console.error('Error streaming file:', error);
-        res.status(500).send('Error streaming file');
-      });
-    } else {
-      // Stream the full video
-      const responseStream = await blobClient.download();
-      responseStream.readableStreamBody.pipe(res);
-    }
+    const sasUrl = await generateSasToken(filename);
+    res.send(sasUrl);
   } catch (error) {
     console.error('Error streaming file:', error);
     res.status(500).send('Error streaming file');
   }
 });
-
 
 // Start the server
 app.listen(3001, () => {
